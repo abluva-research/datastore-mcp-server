@@ -5,10 +5,10 @@
 sources:
     default-pg-source:
         kind: postgres
-        host: 172.16.1.85
+        host: 172.16.1.86
         port: 9393
         database: chinook
-        user: Amit
+        user: abluva
         password: Abluva@2026
         lazyConnect: true
 
