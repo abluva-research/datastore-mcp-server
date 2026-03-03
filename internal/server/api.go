@@ -23,6 +23,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/render"
+	"github.com/googleapis/genai-toolbox/internal/server/pseudokey"
+	"github.com/googleapis/genai-toolbox/internal/server/resources"
+	"github.com/googleapis/genai-toolbox/internal/sources"
 	"github.com/googleapis/genai-toolbox/internal/tools"
 	"github.com/googleapis/genai-toolbox/internal/util"
 	"github.com/googleapis/genai-toolbox/internal/util/parameters"
@@ -231,6 +234,43 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Extract pseudo_key from request body (if provided) and inject into context
+	if pkRaw, ok := data["pseudo_key"]; ok {
+		delete(data, "pseudo_key")
+		if pk, ok := pkRaw.(string); ok && pk != "" {
+			ctx = pseudokey.WithPseudoKey(ctx, pk)
+			r = r.WithContext(ctx)
+			s.logger.DebugContext(ctx, fmt.Sprintf("pseudo_key provided: %s", pk))
+		}
+	}
+
+	// Extract dynamic database credentials from request body (if provided)
+	var sourceProvider tools.SourceProvider = s.ResourceMgr
+	if dbCredsRaw, ok := data["db_credentials"]; ok {
+		// Remove db_credentials from data so it doesn't get parsed as a tool parameter
+		delete(data, "db_credentials")
+		if creds, dynErr := parseDynamicCredentials(dbCredsRaw); dynErr == nil {
+			// Get source name from the current tool being invoked
+			targetSource := getToolSourceName(tool)
+			if targetSource == "" {
+				// Fallback: try header
+				targetSource = r.Header.Get("X-Dynamic-Source")
+			}
+			if targetSource != "" {
+				dynProvider, dynErr := resources.NewDynamicSourceProvider(s.ResourceMgr, s.DynCache, ctx, creds, targetSource)
+				if dynErr != nil {
+					s.logger.DebugContext(ctx, fmt.Sprintf("failed to create dynamic source provider: %v", dynErr))
+					_ = render.Render(w, r, newErrResponse(dynErr, http.StatusBadRequest))
+					return
+				}
+				sourceProvider = dynProvider
+				s.logger.DebugContext(ctx, fmt.Sprintf("using dynamic credentials for source %q, user=%s", targetSource, creds.User))
+			} else {
+				s.logger.DebugContext(ctx, "db_credentials provided but could not determine target source name from tool config")
+			}
+		}
+	}
+
 	params, err := parameters.ParseParams(tool.GetParameters(), data, claimsFromAuth)
 	if err != nil {
 		var clientServerErr *util.ClientServerError
@@ -267,7 +307,7 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := tool.Invoke(ctx, s.ResourceMgr, params, accessToken)
+	res, err := tool.Invoke(ctx, sourceProvider, params, accessToken)
 
 	// Determine what error to return to the users.
 	if err != nil {
@@ -366,4 +406,53 @@ type errResponse struct {
 func (e *errResponse) Render(w http.ResponseWriter, r *http.Request) error {
 	render.Status(r, e.HTTPStatusCode)
 	return nil
+}
+
+// parseDynamicCredentials extracts DynamicCredentials from a raw interface{} value.
+func parseDynamicCredentials(raw any) (*sources.DynamicCredentials, error) {
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("db_credentials must be a JSON object")
+	}
+	creds := &sources.DynamicCredentials{}
+	if v, ok := m["host"].(string); ok {
+		creds.Host = v
+	}
+	if v, ok := m["port"].(string); ok {
+		creds.Port = v
+	}
+	if v, ok := m["user"].(string); ok {
+		creds.User = v
+	}
+	if v, ok := m["password"].(string); ok {
+		creds.Password = v
+	}
+	if v, ok := m["database"].(string); ok {
+		creds.Database = v
+	}
+	if creds.Host == "" || creds.User == "" || creds.Database == "" {
+		return nil, fmt.Errorf("db_credentials requires at least host, user, and database")
+	}
+	return creds, nil
+}
+
+// getToolSourceName extracts the source name from a Tool via its config.
+// Returns empty string if the tool config does not expose a source name.
+func getToolSourceName(t tools.Tool) string {
+	cfg := t.ToConfig()
+	cfgBytes, err := json.Marshal(cfg)
+	if err != nil {
+		return ""
+	}
+	var cfgMap map[string]any
+	if err := json.Unmarshal(cfgBytes, &cfgMap); err != nil {
+		return ""
+	}
+	// Check both cases: Go defaults to capitalized field name when no json tag
+	for _, key := range []string{"source", "Source"} {
+		if src, ok := cfgMap[key].(string); ok && src != "" {
+			return src
+		}
+	}
+	return ""
 }

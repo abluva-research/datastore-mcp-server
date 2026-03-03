@@ -34,6 +34,7 @@ type ResourceManager struct {
 	toolsets        map[string]tools.Toolset
 	prompts         map[string]prompts.Prompt
 	promptsets      map[string]prompts.Promptset
+	DynCache        *sources.DynamicSourceCache
 }
 
 func NewResourceManager(
@@ -56,6 +57,11 @@ func NewResourceManager(
 	}
 
 	return resourceMgr
+}
+
+// SetDynCache sets the dynamic source cache on the resource manager.
+func (r *ResourceManager) SetDynCache(cache *sources.DynamicSourceCache) {
+	r.DynCache = cache
 }
 
 func (r *ResourceManager) GetSource(sourceName string) (sources.Source, bool) {

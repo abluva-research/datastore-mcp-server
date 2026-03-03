@@ -21,6 +21,7 @@ import (
 
 	yaml "github.com/goccy/go-yaml"
 	"github.com/googleapis/genai-toolbox/internal/embeddingmodels"
+	"github.com/googleapis/genai-toolbox/internal/server/pseudokey"
 	"github.com/googleapis/genai-toolbox/internal/sources"
 	"github.com/googleapis/genai-toolbox/internal/tools"
 	"github.com/googleapis/genai-toolbox/internal/util"
@@ -109,6 +110,12 @@ func (t Tool) Invoke(ctx context.Context, resourceMgr tools.SourceProvider, para
 		return nil, util.NewAgentError("unable to extract standard params", err)
 	}
 	sliceParams := newParams.AsSlice()
+
+	// Inject pseudo-key as a SQL comment if provided in context
+	if pk, ok := pseudokey.FromContext(ctx); ok {
+		newStatement = fmt.Sprintf("/* pseudo-key: %s */ %s", pk, newStatement)
+	}
+
 	resp, err := source.RunSQL(ctx, newStatement, sliceParams)
 	if err != nil {
 		return nil, util.ProcessGeneralError(err)

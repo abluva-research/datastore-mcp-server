@@ -24,6 +24,7 @@ import (
 
 	"github.com/googleapis/genai-toolbox/internal/prompts"
 	"github.com/googleapis/genai-toolbox/internal/server/mcp/jsonrpc"
+	mcputil "github.com/googleapis/genai-toolbox/internal/server/mcp/util"
 	"github.com/googleapis/genai-toolbox/internal/server/resources"
 	"github.com/googleapis/genai-toolbox/internal/tools"
 	"github.com/googleapis/genai-toolbox/internal/util"
@@ -155,6 +156,27 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, resourceMgr *re
 		return jsonrpc.NewError(id, jsonrpc.INTERNAL_ERROR, err.Error(), nil), err
 	}
 
+	// Extract pseudo_key from arguments and inject into context
+	ctx = mcputil.ExtractPseudoKey(ctx, data)
+
+	// Extract dynamic database credentials from arguments (if provided)
+	var sourceProvider tools.SourceProvider = resourceMgr
+	if dbCredsRaw, ok := data["db_credentials"]; ok {
+		delete(data, "db_credentials")
+		if creds, dynErr := mcputil.ParseDynamicCredentials(dbCredsRaw); dynErr == nil {
+			targetSource := mcputil.GetToolSourceName(tool)
+			if targetSource != "" && resourceMgr.DynCache != nil {
+				dynProvider, dynErr := resources.NewDynamicSourceProvider(resourceMgr, resourceMgr.DynCache, ctx, creds, targetSource)
+				if dynErr == nil {
+					sourceProvider = dynProvider
+					logger.DebugContext(ctx, fmt.Sprintf("MCP: using dynamic credentials for source %q, user=%s", targetSource, creds.User))
+				} else {
+					return jsonrpc.NewError(id, jsonrpc.INTERNAL_ERROR, dynErr.Error(), nil), dynErr
+				}
+			}
+		}
+	}
+
 	// Tool authentication
 	// claimsFromAuth maps the name of the authservice to the claims retrieved from it.
 	claimsFromAuth := make(map[string]map[string]any)
@@ -210,7 +232,7 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, resourceMgr *re
 	}
 
 	// run tool invocation and generate response.
-	results, err := tool.Invoke(ctx, resourceMgr, params, accessToken)
+	results, err := tool.Invoke(ctx, sourceProvider, params, accessToken)
 	if err != nil {
 		var tbErr util.ToolboxError
 

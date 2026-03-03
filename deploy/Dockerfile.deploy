@@ -1,0 +1,26 @@
+FROM golang:1.24-alpine AS builder
+
+WORKDIR /build
+
+RUN apk add --no-cache git
+
+# Copy go mod files first for layer caching
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy all source
+COPY . .
+
+# Build static binary with slim tag (PostgreSQL only, no Oracle/CGO)
+RUN CGO_ENABLED=0 GOOS=linux go build -tags slim -a -installsuffix cgo -o genai-toolbox .
+
+# Runtime stage
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates curl
+
+WORKDIR /app
+COPY --from=builder /build/genai-toolbox /toolbox
+
+EXPOSE 5000
+ENTRYPOINT ["/toolbox"]

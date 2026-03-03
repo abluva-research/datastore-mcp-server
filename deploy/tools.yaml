@@ -1,0 +1,75 @@
+# MCP Toolbox - Dynamic Credentials Configuration
+# This is a default/fallback configuration. When db_credentials are provided
+# in tool call arguments, they will override this source's connection.
+
+sources:
+    default-pg-source:
+        kind: postgres
+        host: 172.16.1.87
+        port: 5432
+        database: control_plane_dev
+        user: postgres
+        password: postgres
+        lazyConnect: true
+
+tools:
+    run_sql:
+        kind: postgres-sql
+        source: default-pg-source
+        description: "Execute a SQL query against the PostgreSQL database. Supports SELECT, INSERT, UPDATE, DELETE statements. Pass db_credentials in arguments to connect with a specific user account."
+        statement: "{{.sql}}"
+        templateParameters:
+            - name: sql
+              type: string
+              description: "The SQL statement to execute"
+
+    list_tables:
+        kind: postgres-sql
+        source: default-pg-source
+        description: "List all tables in the current database schema. Pass db_credentials in arguments to connect with a specific user account."
+        statement: |
+            SELECT table_schema, table_name, table_type
+            FROM information_schema.tables
+            WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+            ORDER BY table_schema, table_name
+
+    describe_table:
+        kind: postgres-sql
+        source: default-pg-source
+        description: "Describe the columns of a specific table. Pass db_credentials in arguments to connect with a specific user account."
+        statement: |
+            SELECT column_name, data_type, is_nullable, column_default
+            FROM information_schema.columns
+            WHERE table_name = $1
+            ORDER BY ordinal_position
+        parameters:
+            - name: table_name
+              type: string
+              description: "The name of the table to describe"
+
+    search_vector:
+        kind: postgres-sql
+        source: default-pg-source
+        description: "Perform a vector similarity search using pgvector. Pass db_credentials in arguments to connect with a specific user account."
+        statement: |
+            SELECT *, (embedding <=> $1::vector) as distance
+            FROM $2
+            ORDER BY distance
+            LIMIT $3
+        parameters:
+            - name: query_vector
+              type: string
+              description: "The query vector as a string, e.g. '[0.1, 0.2, ...]'"
+            - name: table_name
+              type: string
+              description: "The table containing vector embeddings"
+            - name: limit_count
+              type: string
+              description: "Maximum number of results to return (default 10)"
+
+toolsets:
+    default:
+        - run_sql
+        - list_tables
+        - describe_table
+        - search_vector

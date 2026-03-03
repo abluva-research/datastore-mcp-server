@@ -58,6 +58,7 @@ type Config struct {
 	Database      string            `yaml:"database" validate:"required"`
 	QueryParams   map[string]string `yaml:"queryParams"`
 	QueryExecMode string            `yaml:"queryExecMode" validate:"omitempty,oneof=cache_statement cache_describe describe_exec exec simple_protocol"`
+	LazyConnect   bool              `yaml:"lazyConnect"`
 }
 
 func (r Config) SourceConfigType() string {
@@ -70,9 +71,11 @@ func (r Config) Initialize(ctx context.Context, tracer trace.Tracer) (sources.So
 		return nil, fmt.Errorf("unable to create pool: %w", err)
 	}
 
-	err = pool.Ping(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("unable to connect successfully: %w", err)
+	if !r.LazyConnect {
+		err = pool.Ping(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("unable to connect successfully: %w", err)
+		}
 	}
 
 	s := &Source{

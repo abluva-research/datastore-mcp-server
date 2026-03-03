@@ -52,6 +52,7 @@ type Server struct {
 	instrumentation *telemetry.Instrumentation
 	sseManager      *sseManager
 	ResourceMgr     *resources.ResourceManager
+	DynCache        *sources.DynamicSourceCache
 }
 
 func InitializeConfigs(ctx context.Context, cfg ServerConfig) (
@@ -370,6 +371,10 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 
 	resourceManager := resources.NewResourceManager(sourcesMap, authServicesMap, embeddingModelsMap, toolsMap, toolsetsMap, promptsMap, promptsetsMap)
 
+	// Dynamic source cache: pools expire after 30 minutes
+	dynCache := sources.NewDynamicSourceCache(ctx, 30*time.Minute)
+	resourceManager.SetDynCache(dynCache)
+
 	s := &Server{
 		version:         cfg.Version,
 		srv:             srv,
@@ -378,6 +383,7 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 		instrumentation: instrumentation,
 		sseManager:      sseManager,
 		ResourceMgr:     resourceManager,
+		DynCache:        dynCache,
 	}
 
 	// cors
