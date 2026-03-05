@@ -23,8 +23,10 @@ import (
 	"net/http"
 
 	"github.com/googleapis/genai-toolbox/internal/prompts"
+	"github.com/googleapis/genai-toolbox/internal/server/geofence"
 	"github.com/googleapis/genai-toolbox/internal/server/mcp/jsonrpc"
 	mcputil "github.com/googleapis/genai-toolbox/internal/server/mcp/util"
+	"github.com/googleapis/genai-toolbox/internal/server/pseudokey"
 	"github.com/googleapis/genai-toolbox/internal/server/resources"
 	"github.com/googleapis/genai-toolbox/internal/tools"
 	"github.com/googleapis/genai-toolbox/internal/util"
@@ -152,6 +154,30 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, resourceMgr *re
 
 	// Extract x-ablv-virtual-identity from arguments and inject into context
 	ctx = mcputil.ExtractVirtualIdentity(ctx, data)
+
+	// Geo-fence enforcement
+	if checker, ok := geofence.CheckerFromContext(ctx); ok {
+		vi, _ := pseudokey.FromContext(ctx)
+		isStdio := geofence.IsStdioFromContext(ctx)
+		var clientIP, clientRegion string
+		if v, ok := data["x-ablv-client-ip"]; ok {
+			if s, ok := v.(string); ok {
+				clientIP = s
+			}
+			delete(data, "x-ablv-client-ip")
+		}
+		if v, ok := data["x-ablv-client-region"]; ok {
+			if s, ok := v.(string); ok {
+				clientRegion = s
+			}
+			delete(data, "x-ablv-client-region")
+		}
+		if geoErr := checker.CheckGeoFence(vi, isStdio, clientIP, clientRegion); geoErr != nil {
+			logger.DebugContext(ctx, fmt.Sprintf("geo-fence check failed: %v", geoErr))
+			text := TextContent{Type: "text", Text: geoErr.Error()}
+			return jsonrpc.JSONRPCResponse{Jsonrpc: jsonrpc.JSONRPC_VERSION, Id: id, Result: CallToolResult{Content: []TextContent{text}, IsError: true}}, nil
+		}
+	}
 
 	// Extract dynamic database credentials from arguments (if provided)
 	var sourceProvider tools.SourceProvider = resourceMgr

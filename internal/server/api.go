@@ -244,6 +244,29 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Geo-fence enforcement for REST API
+	if s.GeoChecker != nil {
+		vi, _ := pseudokey.FromContext(ctx)
+		var clientIP, clientRegion string
+		if v, ok := data["x-ablv-client-ip"]; ok {
+			if s2, ok := v.(string); ok {
+				clientIP = s2
+			}
+			delete(data, "x-ablv-client-ip")
+		}
+		if v, ok := data["x-ablv-client-region"]; ok {
+			if s2, ok := v.(string); ok {
+				clientRegion = s2
+			}
+			delete(data, "x-ablv-client-region")
+		}
+		if geoErr := s.GeoChecker.CheckGeoFence(vi, false, clientIP, clientRegion); geoErr != nil {
+			s.logger.DebugContext(ctx, fmt.Sprintf("geo-fence check failed: %v", geoErr))
+			_ = render.Render(w, r, newErrResponse(geoErr, http.StatusForbidden))
+			return
+		}
+	}
+
 	// Extract dynamic database credentials from request body (if provided)
 	var sourceProvider tools.SourceProvider = s.ResourceMgr
 	if dbCredsRaw, ok := data["db_credentials"]; ok {

@@ -30,6 +30,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/render"
 	"github.com/google/uuid"
+	"github.com/googleapis/genai-toolbox/internal/server/geofence"
 	"github.com/googleapis/genai-toolbox/internal/server/mcp"
 	"github.com/googleapis/genai-toolbox/internal/server/mcp/jsonrpc"
 	mcputil "github.com/googleapis/genai-toolbox/internal/server/mcp/util"
@@ -534,6 +535,13 @@ func httpHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 
 // processMcpMessage process the messages received from clients
 func processMcpMessage(ctx context.Context, body []byte, s *Server, protocolVersion string, toolsetName string, promptsetName string, header http.Header, networkProtocolVersion string) (string, any, error) {
+	// Inject geo-fence checker and stdio flag into context
+	if s.GeoChecker != nil {
+		ctx = geofence.WithChecker(ctx, s.GeoChecker)
+	}
+	isStdio := header == nil
+	ctx = geofence.WithStdio(ctx, isStdio)
+
 	logger, err := util.LoggerFromContext(ctx)
 	if err != nil {
 		return "", jsonrpc.NewError("", jsonrpc.INTERNAL_ERROR, err.Error(), nil), err

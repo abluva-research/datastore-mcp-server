@@ -20,6 +20,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,6 +34,7 @@ import (
 	"github.com/googleapis/genai-toolbox/internal/embeddingmodels"
 	"github.com/googleapis/genai-toolbox/internal/log"
 	"github.com/googleapis/genai-toolbox/internal/prompts"
+	"github.com/googleapis/genai-toolbox/internal/server/geofence"
 	"github.com/googleapis/genai-toolbox/internal/server/resources"
 	"github.com/googleapis/genai-toolbox/internal/sources"
 	"github.com/googleapis/genai-toolbox/internal/telemetry"
@@ -53,6 +55,7 @@ type Server struct {
 	sseManager      *sseManager
 	ResourceMgr     *resources.ResourceManager
 	DynCache        *sources.DynamicSourceCache
+	GeoChecker      *geofence.Checker
 }
 
 func InitializeConfigs(ctx context.Context, cfg ServerConfig) (
@@ -375,6 +378,15 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 	dynCache := sources.NewDynamicSourceCache(ctx, 30*time.Minute)
 	resourceManager.SetDynCache(dynCache)
 
+	// Initialize geo-fence checker — env var overrides the hardcoded default
+	const defaultBackendURL = "https://172.16.1.86:4001"
+	backendURL := os.Getenv("ABLV_BACKEND_URL")
+	if backendURL == "" {
+		backendURL = defaultBackendURL
+	}
+	geoChecker := geofence.NewChecker(backendURL)
+	l.DebugContext(ctx, fmt.Sprintf("Geo-fence checker initialized with backend: %s", backendURL))
+
 	s := &Server{
 		version:         cfg.Version,
 		srv:             srv,
@@ -384,6 +396,7 @@ func NewServer(ctx context.Context, cfg ServerConfig) (*Server, error) {
 		sseManager:      sseManager,
 		ResourceMgr:     resourceManager,
 		DynCache:        dynCache,
+		GeoChecker:      geoChecker,
 	}
 
 	// cors
