@@ -172,9 +172,11 @@ func toolsCallHandler(ctx context.Context, id jsonrpc.RequestId, resourceMgr *re
 			}
 			delete(data, "x-ablv-client-region")
 		}
-		if geoErr := checker.CheckGeoFence(vi, isStdio, clientIP, clientRegion); geoErr != nil {
-			logger.DebugContext(ctx, fmt.Sprintf("geo-fence check failed: %v", geoErr))
-			text := TextContent{Type: "text", Text: geoErr.Error()}
+		geoResult := checker.CheckGeoFenceWithResult(vi, isStdio, clientIP, clientRegion)
+		checker.LogToBackend(toolName, vi, "Agent", geoResult)
+		if geoResult.Blocked {
+			logger.DebugContext(ctx, fmt.Sprintf("geo-fence check failed: %v", geoResult.BlockReason))
+			text := TextContent{Type: "text", Text: geoResult.BlockReason}
 			return jsonrpc.JSONRPCResponse{Jsonrpc: jsonrpc.JSONRPC_VERSION, Id: id, Result: CallToolResult{Content: []TextContent{text}, IsError: true}}, nil
 		}
 	}

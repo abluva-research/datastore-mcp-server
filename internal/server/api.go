@@ -260,9 +260,11 @@ func toolInvokeHandler(s *Server, w http.ResponseWriter, r *http.Request) {
 			}
 			delete(data, "x-ablv-client-region")
 		}
-		if geoErr := s.GeoChecker.CheckGeoFence(vi, false, clientIP, clientRegion); geoErr != nil {
-			s.logger.DebugContext(ctx, fmt.Sprintf("geo-fence check failed: %v", geoErr))
-			_ = render.Render(w, r, newErrResponse(geoErr, http.StatusForbidden))
+		geoResult := s.GeoChecker.CheckGeoFenceWithResult(vi, false, clientIP, clientRegion)
+		s.GeoChecker.LogToBackend(toolName, vi, "Agent", geoResult)
+		if geoResult.Blocked {
+			s.logger.DebugContext(ctx, fmt.Sprintf("geo-fence check failed: %v", geoResult.BlockReason))
+			_ = render.Render(w, r, newErrResponse(fmt.Errorf("%s", geoResult.BlockReason), http.StatusForbidden))
 			return
 		}
 	}

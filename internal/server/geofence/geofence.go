@@ -368,62 +368,165 @@ func regionMatches(detectedCountry string, allowedRegion string) bool {
 	return false
 }
 
+// GeoFenceResult holds the outcome of a geo-fence check with full context for logging.
+type GeoFenceResult struct {
+	Allowed         bool
+	Blocked         bool
+	BlockReason     string
+	DetectedCountry string
+	AllowedRegion   string
+	ClientIP        string
+	ClientCity      string
+	ClientRegion    string
+	GeoFenceEnabled bool
+	PseudoKey       string
+}
+
 // CheckGeoFence performs the full geo-fence check.
 // For stdio mode: isStdio=true, clientIP and clientRegion can be empty (auto-detected).
 // For HTTP mode: isStdio=false, clientIP/clientRegion should come from the client request.
 // Returns nil if allowed, or an error with a clear message if blocked.
 func (c *Checker) CheckGeoFence(virtualIdentity string, isStdio bool, clientIP string, clientRegion string) error {
+	result := c.CheckGeoFenceWithResult(virtualIdentity, isStdio, clientIP, clientRegion)
+	if result.Blocked {
+		return fmt.Errorf("%s", result.BlockReason)
+	}
+	return nil
+}
+
+// CheckGeoFenceWithResult performs the full geo-fence check and returns a rich result
+// with geo information, decision, and context — useful for logging.
+func (c *Checker) CheckGeoFenceWithResult(virtualIdentity string, isStdio bool, clientIP string, clientRegion string) *GeoFenceResult {
+	result := &GeoFenceResult{PseudoKey: virtualIdentity, ClientIP: clientIP}
+
 	if virtualIdentity == "" {
-		return nil // No virtual identity = no geo-fence check
+		result.Allowed = true
+		return result
 	}
 
 	// Get pseudo key policy
 	policy, err := c.ValidatePseudoKey(virtualIdentity)
 	if err != nil {
-		return nil // Fail-open on backend errors
+		result.Allowed = true // Fail-open on backend errors
+		return result
 	}
 
 	if !policy.Valid {
-		return fmt.Errorf("pseudo key validation failed: %s", policy.Reason)
+		result.Blocked = true
+		result.BlockReason = fmt.Sprintf("pseudo key validation failed: %s", policy.Reason)
+		return result
 	}
 
 	if !policy.GeoFenceEnabled || policy.GeoFenceRegion == "" {
-		return nil // Geo-fencing not enabled for this key
+		result.Allowed = true
+		return result
 	}
 
-	// Determine the client's country
-	var detectedCountry string
+	result.GeoFenceEnabled = true
+	result.AllowedRegion = policy.GeoFenceRegion
 
+	// Determine the client's country
 	if clientRegion != "" {
-		// Client explicitly provided region (HTTP mode)
-		detectedCountry = clientRegion
+		result.DetectedCountry = clientRegion
 	} else if clientIP != "" {
-		// Client provided IP but not region — look up geo
 		geo, err := c.LookupGeo(clientIP)
 		if err != nil || geo.Country == "" {
-			return fmt.Errorf("geo-fence check failed: unable to determine region for IP %s", clientIP)
+			result.Blocked = true
+			result.BlockReason = fmt.Sprintf("geo-fence check failed: unable to determine region for IP %s", clientIP)
+			return result
 		}
-		detectedCountry = geo.Country
+		result.DetectedCountry = geo.Country
+		result.ClientCity = geo.City
+		result.ClientRegion = geo.Region
+		result.ClientIP = geo.IP
 	} else if isStdio {
-		// stdio mode — auto-detect
 		geo, err := c.GetPublicIPGeo()
 		if err != nil || geo.Country == "" {
-			return fmt.Errorf("geo-fence check failed: unable to detect public IP for region verification")
+			result.Blocked = true
+			result.BlockReason = "geo-fence check failed: unable to detect public IP for region verification"
+			return result
 		}
-		detectedCountry = geo.Country
+		result.DetectedCountry = geo.Country
+		result.ClientCity = geo.City
+		result.ClientRegion = geo.Region
+		result.ClientIP = geo.IP
 	} else {
-		// HTTP mode with no IP/region provided
-		return fmt.Errorf("geo-fence is enabled for this key but no client IP or region was provided. " +
-			"Include 'x-ablv-client-ip' or 'x-ablv-client-region' in your request arguments")
+		result.Blocked = true
+		result.BlockReason = "geo-fence is enabled for this key but no client IP or region was provided. " +
+			"Include 'x-ablv-client-ip' or 'x-ablv-client-region' in your request arguments"
+		return result
 	}
 
 	// Check if detected country matches allowed region
-	if !regionMatches(detectedCountry, policy.GeoFenceRegion) {
-		return fmt.Errorf(
+	if !regionMatches(result.DetectedCountry, policy.GeoFenceRegion) {
+		result.Blocked = true
+		result.BlockReason = fmt.Sprintf(
 			"geo-fence violation: access denied. Your detected region '%s' is not within the allowed region '%s' for this pseudo key",
-			detectedCountry, policy.GeoFenceRegion,
+			result.DetectedCountry, policy.GeoFenceRegion,
 		)
+		return result
 	}
 
-	return nil
+	result.Allowed = true
+	return result
+}
+
+// LogToBackend sends a request log event to the backend /api/ext-proc/mcp-log endpoint.
+// This is fire-and-forget (async, non-blocking).
+func (c *Checker) LogToBackend(toolName, identity, identityType string, geoResult *GeoFenceResult) {
+	go func() {
+		logType := "allowed"
+		if geoResult.Blocked {
+			logType = "blocked"
+		}
+
+		payload := fmt.Sprintf(`{
+			"method": "MCP",
+			"host": "mcp-toolbox",
+			"path": "/%s",
+			"tool_name": "%s",
+			"type": "%s",
+			"block_reason": "%s",
+			"rule_type": "mcp_geofence",
+			"identity_type": "%s",
+			"identity": "%s",
+			"user_email": "%s",
+			"provider": "MCP Toolbox",
+			"pseudo_key": "%s",
+			"client_ip": "%s",
+			"client_city": "%s",
+			"client_region": "%s",
+			"client_country": "%s",
+			"body_preview": "Geo-fence: region=%s allowed=%s detected=%s"
+		}`,
+			toolName, toolName, logType,
+			escapeJSON(geoResult.BlockReason),
+			identityType, escapeJSON(identity), escapeJSON(identity),
+			geoResult.PseudoKey,
+			geoResult.ClientIP, geoResult.ClientCity, geoResult.ClientRegion, geoResult.DetectedCountry,
+			geoResult.AllowedRegion, geoResult.DetectedCountry, geoResult.DetectedCountry,
+		)
+
+		resp, err := c.httpClient.Post(
+			c.backendURL+"/api/ext-proc/mcp-log",
+			"application/json",
+			strings.NewReader(payload),
+		)
+		if err != nil {
+			fmt.Printf("[geofence] Failed to log to backend: %v\n", err)
+			return
+		}
+		defer resp.Body.Close()
+		io.ReadAll(resp.Body)
+	}()
+}
+
+// escapeJSON escapes a string for safe inclusion in a JSON string literal.
+func escapeJSON(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	s = strings.ReplaceAll(s, "\r", `\r`)
+	s = strings.ReplaceAll(s, "\t", `\t`)
+	return s
 }
