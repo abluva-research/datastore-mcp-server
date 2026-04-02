@@ -40,6 +40,10 @@ type PseudoKeyGeoPolicy struct {
 	GeoFenceRegion  string `json:"geo_fence_region"`
 	Valid           bool   `json:"valid"`
 	Reason          string `json:"reason,omitempty"`
+	AgentName       string `json:"agent_name,omitempty"`
+	PseudoKeyID     int    `json:"pseudo_key_id,omitempty"`
+	ProjectName     string `json:"project_name,omitempty"`
+	MemberRole      string `json:"member_role,omitempty"`
 }
 
 // cachedGeo is a geo lookup result with expiry.
@@ -86,7 +90,7 @@ func NewChecker(backendURL string) *Checker {
 			},
 		},
 		geoCacheTTL:    24 * time.Hour,
-		policyCacheTTL: 5 * time.Minute,
+		policyCacheTTL: 30 * time.Second,
 	}
 }
 
@@ -254,6 +258,11 @@ func (c *Checker) ValidatePseudoKey(virtualIdentity string) (*PseudoKeyGeoPolicy
 		Reason          string `json:"reason"`
 		GeoFenceEnabled bool   `json:"geo_fence_enabled"`
 		GeoFenceRegion  string `json:"geo_fence_region"`
+		AgentName       string `json:"agent_name"`
+		Label           string `json:"label"`
+		PseudoKeyID     int    `json:"pseudo_key_id"`
+		ProjectName     string `json:"project_name"`
+		MemberRole      string `json:"member_role"`
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
 		policy := &PseudoKeyGeoPolicy{Valid: true, GeoFenceEnabled: false}
@@ -261,11 +270,21 @@ func (c *Checker) ValidatePseudoKey(virtualIdentity string) (*PseudoKeyGeoPolicy
 		return policy, nil
 	}
 
+	// Resolve agent name: prefer agent_name (from inventory), fall back to label
+	agentName := result.AgentName
+	if agentName == "" {
+		agentName = result.Label
+	}
+
 	policy := &PseudoKeyGeoPolicy{
 		Valid:           result.Valid,
 		Reason:          result.Reason,
 		GeoFenceEnabled: result.GeoFenceEnabled,
 		GeoFenceRegion:  result.GeoFenceRegion,
+		AgentName:       agentName,
+		PseudoKeyID:     result.PseudoKeyID,
+		ProjectName:     result.ProjectName,
+		MemberRole:      result.MemberRole,
 	}
 	c.policyCache[virtualIdentity] = &cachedPolicy{policy: policy, expiresAt: time.Now().Add(c.policyCacheTTL)}
 	return policy, nil
@@ -380,6 +399,10 @@ type GeoFenceResult struct {
 	ClientRegion    string
 	GeoFenceEnabled bool
 	PseudoKey       string
+	AgentName       string // Resolved agent name from inventory (for logging)
+	PseudoKeyID     int
+	ProjectName     string // Project the agent belongs to (from Project Hub)
+	MemberRole      string // Agent's role in the project
 }
 
 // CheckGeoFence performs the full geo-fence check.
@@ -416,6 +439,12 @@ func (c *Checker) CheckGeoFenceWithResult(virtualIdentity string, isStdio bool, 
 		result.BlockReason = fmt.Sprintf("pseudo key validation failed: %s", policy.Reason)
 		return result
 	}
+
+	// Populate resolved agent name from policy (resolved during ValidatePseudoKey)
+	result.AgentName = policy.AgentName
+	result.PseudoKeyID = policy.PseudoKeyID
+	result.ProjectName = policy.ProjectName
+	result.MemberRole = policy.MemberRole
 
 	if !policy.GeoFenceEnabled || policy.GeoFenceRegion == "" {
 		result.Allowed = true
@@ -473,11 +502,18 @@ func (c *Checker) CheckGeoFenceWithResult(virtualIdentity string, isStdio bool, 
 
 // LogToBackend sends a request log event to the backend /api/ext-proc/mcp-log endpoint.
 // This is fire-and-forget (async, non-blocking).
+// Uses the resolved agent name from the geo-fence result (if available) instead of the raw pseudo key.
 func (c *Checker) LogToBackend(toolName, identity, identityType string, geoResult *GeoFenceResult) {
 	go func() {
 		logType := "allowed"
 		if geoResult.Blocked {
 			logType = "blocked"
+		}
+
+		// Use resolved agent name if available, otherwise fall back to raw identity
+		resolvedIdentity := identity
+		if geoResult.AgentName != "" {
+			resolvedIdentity = geoResult.AgentName
 		}
 
 		payload := fmt.Sprintf(`{
@@ -491,8 +527,11 @@ func (c *Checker) LogToBackend(toolName, identity, identityType string, geoResul
 			"identity_type": "%s",
 			"identity": "%s",
 			"user_email": "%s",
+			"user_role": "%s",
 			"provider": "MCP Toolbox",
 			"pseudo_key": "%s",
+			"pseudo_key_id": %d,
+			"matched_projects": "%s",
 			"client_ip": "%s",
 			"client_city": "%s",
 			"client_region": "%s",
@@ -501,8 +540,10 @@ func (c *Checker) LogToBackend(toolName, identity, identityType string, geoResul
 		}`,
 			toolName, toolName, logType,
 			escapeJSON(geoResult.BlockReason),
-			identityType, escapeJSON(identity), escapeJSON(identity),
-			geoResult.PseudoKey,
+			identityType, escapeJSON(resolvedIdentity), escapeJSON(resolvedIdentity),
+			escapeJSON(geoResult.MemberRole),
+			geoResult.PseudoKey, geoResult.PseudoKeyID,
+			escapeJSON(geoResult.ProjectName),
 			geoResult.ClientIP, geoResult.ClientCity, geoResult.ClientRegion, geoResult.DetectedCountry,
 			geoResult.AllowedRegion, geoResult.DetectedCountry, geoResult.DetectedCountry,
 		)
